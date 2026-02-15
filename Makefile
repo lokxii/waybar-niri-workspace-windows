@@ -3,5 +3,5 @@ all:
 		-g \
 		main.c \
 		cJSON.c \
-		-o current_workspace_windows.so \
+		-o workspace_windows.so \
 		`pkg-config --cflags --libs gtk+-3.0`

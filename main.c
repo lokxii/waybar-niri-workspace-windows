@@ -343,9 +343,6 @@ void* wbcffi_init(
     gtk_widget_set_name(GTK_WIDGET(inst->container), "workspace-windows");
     gtk_container_add(GTK_CONTAINER(root), GTK_WIDGET(inst->container));
 
-    GtkButton* button = GTK_BUTTON(gtk_button_new_with_label("label"));
-    gtk_container_add(GTK_CONTAINER(inst->container), GTK_WIDGET(button));
-
     return inst;
 }
 
