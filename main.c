@@ -26,6 +26,7 @@ typedef struct {
 static int instance_count = 0;
 
 typedef struct {
+    uint64_t id;
     uint64_t workspace_id;
     char* app_id;
     uint64_t pos_x;
@@ -153,6 +154,7 @@ int parse_ipc(
                 kh_val(windows, k).app_id = NULL;
             }
             kh_val(windows, k) = (Window){
+                .id = id,
                 .workspace_id = workspace_id,
                 .app_id = app_id,
                 .pos_x = x,
@@ -234,6 +236,7 @@ int parse_ipc(
             kh_val(windows, k).app_id = NULL;
         }
         kh_val(windows, k) = (Window){
+            .id = id,
             .workspace_id = workspace_id,
             .app_id = app_id,
             .pos_x = x,
@@ -436,6 +439,12 @@ void wbcffi_update(void* inst) {
 
     for (size_t i = 0; i < current_workspace_n_windows; i++) {
         GtkWidget* widget = widget_from_app_id(ws[i].app_id);
+        GtkStyleContext* context = gtk_widget_get_style_context(widget);
+        if (ws[i].id == current_focused_window) {
+            gtk_style_context_add_class(context, "focused");
+        } else {
+            gtk_style_context_remove_class(context, "focused");
+        }
         gtk_box_pack_start(instance->container, widget, FALSE, FALSE, 0);
         gtk_box_reorder_child(instance->container, widget, i);
         gtk_widget_show_all(GTK_WIDGET(instance->container));
