@@ -16,6 +16,7 @@
 #include "waybar_cffi_module.h"
 
 const size_t wbcffi_version = 2;
+gint ICON_SIZE = 14;
 
 typedef struct {
     wbcffi_module* waybar_module;
@@ -59,14 +60,14 @@ int compare_window(const void* l, const void* r) {
 int connect_to_niri() {
     const char* socket_path = getenv("NIRI_SOCKET");
     if (!socket_path) {
-        fprintf(stderr, "[NIRI IPC] Niri not running");
+        fprintf(stderr, "[Niri Workspace Windows] Niri not running");
         return -1;
     }
 
     struct sockaddr_un addr;
     int socketfd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (socketfd == -1) {
-        fprintf(stderr, "[NIRI IPC] Failed to create socket");
+        fprintf(stderr, "[Niri Workspace Windows] Failed to create socket");
         return -1;
     }
 
@@ -76,7 +77,7 @@ int connect_to_niri() {
 
     if (connect(socketfd, (struct sockaddr*)&addr, sizeof(addr)) == -1) {
         close(socketfd);
-        fprintf(stderr, "[NIRI IPC] Failed to connect socket");
+        fprintf(stderr, "[Niri Workspace Windows] Failed to connect socket");
         return -1;
     }
 
@@ -90,7 +91,7 @@ int parse_ipc(
     void (*queue_update)(wbcffi_module*)) {
     const cJSON* ev = cJSON_ParseWithLength(r, len);
     if (!cJSON_IsObject(ev) || cJSON_GetArraySize(ev) == 0) {
-        fprintf(stderr, "[NIRI IPC] Empty response?");
+        fprintf(stderr, "[Niri Workspace Windows] Empty response?");
         return 0;
     }
     mtx_lock(&data_lock);
@@ -99,10 +100,10 @@ int parse_ipc(
     int has_event = 0;
 
     if (!strcmp(ev->string, "WorkspacesChanged")) {
-        fprintf(stderr, "[NIRI IPC] WorkspaceChanged\n");
+        fprintf(stderr, "[Niri Workspace Windows] WorkspaceChanged\n");
         ev = ev->child;
         if (!cJSON_IsArray(ev)) {
-            fprintf(stderr, "[NIRI IPC] Workspaces not array?");
+            fprintf(stderr, "[Niri Workspace Windows] Workspaces not array?");
             mtx_unlock(&data_lock);
             return 0;
         }
@@ -121,7 +122,7 @@ int parse_ipc(
 
         has_event = 1;
     } else if (!strcmp(ev->string, "WindowsChanged")) {
-        fprintf(stderr, "[NIRI IPC] WindowsChanged\n");
+        fprintf(stderr, "[Niri Workspace Windows] WindowsChanged\n");
         ev = ev->child;
         const cJSON* w = NULL;
         cJSON_ArrayForEach(w, ev) {
@@ -160,11 +161,10 @@ int parse_ipc(
                 .pos_x = x,
                 .pos_y = y,
             };
-            fprintf(stderr, "Window: %ld %ld\n", workspace_id, id);
         }
         has_event = 1;
     } else if (!strcmp(ev->string, "WorkspaceActivated")) {
-        fprintf(stderr, "[NIRI IPC] WorkspaceActivated\n");
+        fprintf(stderr, "[Niri Workspace Windows] WorkspaceActivated\n");
         if (cJSON_GetObjectItemCaseSensitive(ev, "focused")->valueint) {
             current_focused_workspace =
                 cJSON_GetObjectItemCaseSensitive(ev, "id")->valueint;
@@ -172,12 +172,12 @@ int parse_ipc(
         }
         has_event = 1;
     } else if (!strcmp(ev->string, "WindowFocusChanged")) {
-        fprintf(stderr, "[NIRI IPC] WindowFocusChanged\n");
+        fprintf(stderr, "[Niri Workspace Windows] WindowFocusChanged\n");
         current_focused_window =
             cJSON_GetObjectItemCaseSensitive(ev, "id")->valueint;
         has_event = 1;
     } else if (!strcmp(ev->string, "WindowLayoutsChanged")) {
-        fprintf(stderr, "[NIRI IPC] WindowLayoutsChanged\n");
+        fprintf(stderr, "[Niri Workspace Windows] WindowLayoutsChanged\n");
         ev = ev->child;
         cJSON* c;
         cJSON_ArrayForEach(c, ev) {
@@ -196,7 +196,8 @@ int parse_ipc(
             if (k == kh_end(windows)) {
                 fprintf(
                     stderr,
-                    "[NIRI IPC] Changing unknown window layout: %ld\n",
+                    "[Niri Workspace Windows] Changing unknown window layout: "
+                    "%ld\n",
                     id);
             } else {
                 kh_val(windows, k).pos_x = x;
@@ -205,7 +206,7 @@ int parse_ipc(
         }
         has_event = 1;
     } else if (!strcmp(ev->string, "WindowOpenedOrChanged")) {
-        fprintf(stderr, "[NIRI IPC] WindowOpenedOrChanged\n");
+        fprintf(stderr, "[Niri Workspace Windows] WindowOpenedOrChanged\n");
         ev = ev->child;
         int64_t id = cJSON_GetObjectItemCaseSensitive(ev, "id")->valueint;
         int is_focused =
@@ -244,7 +245,7 @@ int parse_ipc(
         };
         has_event = 1;
     } else if (!strcmp(ev->string, "WindowClosed")) {
-        fprintf(stderr, "[NIRI IPC] WindowClosed Here\n");
+        fprintf(stderr, "[Niri Workspace Windows] WindowClosed Here\n");
         int64_t id = ev->child->valueint;
         khint_t k = Windows_get(windows, id);
         if (k != kh_end(windows)) {
@@ -257,7 +258,7 @@ int parse_ipc(
         }
         has_event = 1;
     } else {
-        fprintf(stderr, "[NIRI IPC] Unhandled: %s\n", ev->string);
+        fprintf(stderr, "[Niri Workspace Windows] Unhandled: %s\n", ev->string);
     }
 
     mtx_unlock(&data_lock);
@@ -284,18 +285,25 @@ int ipc(void* arg) {
     GError* e;
     if (!g_data_output_stream_put_string(
             ostream, "\"EventStream\"\n", NULL, &e)) {
-        fprintf(stderr, "[NIRI IPC] Cannot write to socket: %s\n", e->message);
+        fprintf(
+            stderr,
+            "[Niri Workspace Windows] Cannot write to socket: %s\n",
+            e->message);
         return 1;
     }
 
     gsize len = 0;
     char* r = g_data_input_stream_read_line(istream, &len, NULL, &e);
     if (!r) {
-        fprintf(stderr, "[NIRI IPC] Cannot read from socket: %s\n", e->message);
+        fprintf(
+            stderr,
+            "[Niri Workspace Windows] Cannot read from socket: %s\n",
+            e->message);
         return 1;
     }
     if (strcmp(r, "{\"Ok\":\"Handled\"}")) {
-        fprintf(stderr, "[NIRI IPC] Failed to start event stream\n");
+        fprintf(
+            stderr, "[Niri Workspace Windows] Failed to start event stream\n");
         return 1;
     }
 
@@ -331,6 +339,23 @@ void* wbcffi_init(
     const wbcffi_init_info* init_info,
     const wbcffi_config_entry* config_entries,
     size_t config_entries_len) {
+    for (size_t i = 0; i < config_entries_len; i++) {
+        const char* key = config_entries[i].key;
+        const char* value = config_entries[i].value;
+        if (!strcmp(key, "icon_size")) {
+            char* endptr = NULL;
+            errno = 0;
+            gint icon_size = strtol(value, &endptr, 10);
+            if (errno || *endptr != '\n') {
+                fputs(
+                    "[Niri Workspace Windows] \"icon_size\" must be a number\n",
+                    stderr);
+                return NULL;
+            }
+            ICON_SIZE = icon_size;
+        }
+    }
+
     WBObject* inst = malloc(sizeof(WBObject));
     inst->waybar_module = init_info->obj;
 
@@ -400,11 +425,13 @@ end_of_desktop_file_seaching:;
         g_string_free(g_array_index(search_prefixes, GString*, i), TRUE);
     }
     g_array_free(search_prefixes, FALSE);
+    GtkImage* img =
+        GTK_IMAGE(gtk_image_new_from_icon_name(app_id, GTK_ICON_SIZE_INVALID));
+    gtk_image_set_pixel_size(img, ICON_SIZE);
+    GtkButton* btn = GTK_BUTTON(gtk_button_new());
+    gtk_button_set_image(btn, GTK_WIDGET(img));
 
-    GtkWidget* widget =
-        gtk_button_new_from_icon_name(app_id, GTK_ICON_SIZE_BUTTON);
-
-    return widget;
+    return GTK_WIDGET(btn);
 }
 
 // Just remove all elements and repopulate container contents
