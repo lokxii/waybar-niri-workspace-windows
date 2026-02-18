@@ -13,11 +13,13 @@ Run `make`
 ## Waybar config
 
 This is a cffi module. To use it in waybar, add `cffi/workspace-windows` to the
-list of modules. Shared object file should be specified in config json as
+list of modules. Shared object file should be specified in config json. Icon
+size can be set in config.
 
 ```json
 "cffi/workspace-windows": {
-    "module_path": "path/to/so/object"
+    "module_path": "path/to/so/object",
+    "icon_size": 14 // default icon size
 }
 ```
 
