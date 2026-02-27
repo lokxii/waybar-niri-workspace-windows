@@ -214,7 +214,12 @@ int parse_ipc(
         int64_t workspace_id =
             cJSON_GetObjectItemCaseSensitive(ev, "workspace_id")->valueint;
         char* app_id =
-            strdup(cJSON_GetObjectItemCaseSensitive(ev, "app_id")->valuestring);
+            cJSON_GetObjectItemCaseSensitive(ev, "app_id")->valuestring;
+        if (!app_id) {
+            mtx_unlock(&data_lock);
+            return 0;
+        }
+        app_id = strdup(app_id);
         cJSON* pos = cJSON_GetObjectItemCaseSensitive(
             cJSON_GetObjectItemCaseSensitive(ev, "layout"),
             "pos_in_scrolling_layout");
