@@ -30,6 +30,7 @@ typedef struct {
     uint64_t id;
     uint64_t workspace_id;
     char* app_id;
+    char* title;
     uint64_t pos_x;
     uint64_t pos_y;
 } Window;
@@ -168,6 +169,8 @@ int parse_ipc(
                 cJSON_GetObjectItemCaseSensitive(w, "workspace_id")->valueint;
             char* app_id = strdup(
                 cJSON_GetObjectItemCaseSensitive(w, "app_id")->valuestring);
+            char* title = strdup(
+                cJSON_GetObjectItemCaseSensitive(w, "title")->valuestring);
             cJSON* pos = cJSON_GetObjectItemCaseSensitive(
                 cJSON_GetObjectItemCaseSensitive(w, "layout"),
                 "pos_in_scrolling_layout");
@@ -193,6 +196,7 @@ int parse_ipc(
                 .id = id,
                 .workspace_id = workspace_id,
                 .app_id = app_id,
+                .title = title,
                 .pos_x = x,
                 .pos_y = y,
             };
@@ -252,13 +256,21 @@ int parse_ipc(
         int64_t workspace_id =
             cJSON_GetObjectItemCaseSensitive(ev, "workspace_id")->valueint;
         char* app_id =
-            strdup(cJSON_GetObjectItemCaseSensitive(ev, "app_id")->valuestring);
+            cJSON_GetObjectItemCaseSensitive(ev, "app_id")->valuestring;
         if (!app_id) {
             cJSON_Delete(root);
             mtx_unlock(&data_lock);
             return 0;
         }
         app_id = strdup(app_id);
+        char* title =
+            cJSON_GetObjectItemCaseSensitive(ev, "title")->valuestring;
+        if (!title) {
+            cJSON_Delete(root);
+            mtx_unlock(&data_lock);
+            return 0;
+        }
+        title = strdup(title);
         cJSON* pos = cJSON_GetObjectItemCaseSensitive(
             cJSON_GetObjectItemCaseSensitive(ev, "layout"),
             "pos_in_scrolling_layout");
@@ -284,6 +296,7 @@ int parse_ipc(
             .id = id,
             .workspace_id = workspace_id,
             .app_id = app_id,
+            .title = title,
             .pos_x = x,
             .pos_y = y,
         };
@@ -294,7 +307,9 @@ int parse_ipc(
         khint_t k = Windows_get(windows, id);
         if (k != kh_end(windows)) {
             free(kh_val(windows, k).app_id);
+            free(kh_val(windows, k).title);
             kh_val(windows, k).app_id = NULL;
+            kh_val(windows, k).title = NULL;
             Windows_del(windows, k);
         }
         if (current_focused_window == id) {
@@ -553,6 +568,7 @@ void wbcffi_update(void* inst) {
 
     for (size_t i = 0; i < ws_n; i++) {
         GtkWidget* widget = widget_from_app_id(ws[i].app_id);
+        gtk_widget_set_tooltip_text(widget, ws[i].title);
         GtkStyleContext* context = gtk_widget_get_style_context(widget);
         if (ws[i].id == current_focused_window) {
             gtk_style_context_add_class(context, "focused");
