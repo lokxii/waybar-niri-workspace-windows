@@ -42,8 +42,16 @@ KHASHL_MAP_INIT(
     Window,
     kh_hash_uint64,
     kh_eq_generic);
+
+typedef struct {
+    int* ids;
+    char** outputs;
+    size_t len;
+} WorkspaceOutputs;
+
 mtx_t data_lock;
 Windows* windows;
+WorkspaceOutputs workspace_outputs;
 int64_t current_focused_workspace = -1;
 int64_t current_focused_window = -1;
 
@@ -108,16 +116,34 @@ int parse_ipc(
             return 0;
         }
 
+        for (size_t i = 0; i < workspace_outputs.len; i++) {
+            free(workspace_outputs.outputs[i]);
+        }
+
+        workspace_outputs.len = cJSON_GetArraySize(ev);
+        workspace_outputs.ids = realloc(
+            workspace_outputs.ids,
+            workspace_outputs.len * sizeof(*workspace_outputs.ids));
+        workspace_outputs.outputs = realloc(
+            workspace_outputs.outputs,
+            workspace_outputs.len * sizeof(*workspace_outputs.outputs));
+
         cJSON* workspace = NULL;
+        size_t i = 0;
         cJSON_ArrayForEach(workspace, ev) {
             int id =
                 cJSON_GetObjectItemCaseSensitive(workspace, "id")->valueint;
             int is_focused =
                 cJSON_GetObjectItemCaseSensitive(workspace, "is_focused")
                     ->valueint;
+            char* output = cJSON_GetObjectItemCaseSensitive(workspace, "output")
+                               ->valuestring;
             if (is_focused) {
                 current_focused_workspace = id;
             }
+            workspace_outputs.ids[i] = id;
+            workspace_outputs.outputs[i] = strdup(output);
+            i += 1;
         }
 
         has_event = 1;
@@ -254,7 +280,7 @@ int parse_ipc(
         };
         has_event = 1;
     } else if (!strcmp(ev->string, "WindowClosed")) {
-        fprintf(stderr, "[Niri Workspace Windows] WindowClosed Here\n");
+        fprintf(stderr, "[Niri Workspace Windows] WindowClosed\n");
         int64_t id = ev->child->valueint;
         khint_t k = Windows_get(windows, id);
         if (k != kh_end(windows)) {
@@ -443,27 +469,70 @@ end_of_desktop_file_seaching:;
     return GTK_WIDGET(btn);
 }
 
+char* get_current_output(WBObject* instance) {
+    GdkWindow* gdk_win = gtk_widget_get_window(GTK_WIDGET(instance->container));
+    if (!gdk_win) {
+        return NULL;
+    }
+    GdkScreen* gdk_screen = gdk_window_get_screen(gdk_win);
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+    int monitor = gdk_screen_get_monitor_at_window(gdk_screen, gdk_win);
+    return gdk_screen_get_monitor_plug_name(gdk_screen, monitor);
+#pragma GCC diagnostic pop
+}
+
+int should_display_window_icon(
+    Window window,
+    uint64_t current_focused_worksapce,
+    const gchar* current_output) {
+    uint64_t workspace_id = window.workspace_id;
+    int focused_workspace_on_output = 0;
+    for (size_t i = 0; i < workspace_outputs.len; i++) {
+        if (current_focused_workspace == workspace_outputs.ids[i] &&
+            !strcmp(current_output, workspace_outputs.outputs[i])) {
+            focused_workspace_on_output = 1;
+            break;
+        }
+    }
+
+    if (focused_workspace_on_output) {
+        return workspace_id == current_focused_workspace;
+    }
+    return 0;
+}
+
 // Just remove all elements and repopulate container contents
 void wbcffi_update(void* inst) {
-    if (current_focused_workspace == -1 || current_focused_window == -1) {
+    if (current_focused_workspace == -1) {
         return;
     }
     WBObject* instance = inst;
+
+    char* current_output = get_current_output(instance);
+
     khint_t k;
-    size_t current_workspace_n_windows = 0;
-    kh_foreach(windows, k) {
-        current_workspace_n_windows +=
-            kh_val(windows, k).workspace_id == current_focused_workspace;
-    }
-    Window ws[current_workspace_n_windows];
-    size_t i = 0;
-    kh_foreach(windows, k) {
-        if (kh_val(windows, k).workspace_id == current_focused_workspace) {
-            ws[i] = kh_val(windows, k);
-            i += 1;
+    size_t ws_n = 0;
+    if (current_focused_window >= 0) {
+        kh_foreach(windows, k) {
+            ws_n += should_display_window_icon(
+                kh_val(windows, k), current_focused_workspace, current_output);
         }
     }
-    qsort(ws, current_workspace_n_windows, sizeof(*ws), compare_window);
+    Window ws[ws_n];
+    if (current_focused_window >= 0) {
+        size_t i = 0;
+        kh_foreach(windows, k) {
+            if (should_display_window_icon(
+                    kh_val(windows, k),
+                    current_focused_workspace,
+                    current_output)) {
+                ws[i] = kh_val(windows, k);
+                i += 1;
+            }
+        }
+        qsort(ws, ws_n, sizeof(*ws), compare_window);
+    }
 
     GList* children =
         gtk_container_get_children(GTK_CONTAINER(instance->container));
@@ -473,7 +542,7 @@ void wbcffi_update(void* inst) {
         children = children->next;
     }
 
-    for (size_t i = 0; i < current_workspace_n_windows; i++) {
+    for (size_t i = 0; i < ws_n; i++) {
         GtkWidget* widget = widget_from_app_id(ws[i].app_id);
         GtkStyleContext* context = gtk_widget_get_style_context(widget);
         if (ws[i].id == current_focused_window) {
