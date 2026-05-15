@@ -173,8 +173,12 @@ int parse_ipc(
         has_event = 1;
     } else if (!strcmp(ev->string, "WindowFocusChanged")) {
         fprintf(stderr, "[Niri Workspace Windows] WindowFocusChanged\n");
-        current_focused_window =
-            cJSON_GetObjectItemCaseSensitive(ev, "id")->valueint;
+        cJSON* id = cJSON_GetObjectItemCaseSensitive(ev, "id");
+        if (cJSON_IsNull(id)) {
+            current_focused_window = -1;
+        } else {
+            current_focused_window = id->valueint;
+        }
         has_event = 1;
     } else if (!strcmp(ev->string, "WindowLayoutsChanged")) {
         fprintf(stderr, "[Niri Workspace Windows] WindowLayoutsChanged\n");
