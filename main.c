@@ -21,10 +21,7 @@ gint ICON_SIZE = 14;
 typedef struct {
     wbcffi_module* waybar_module;
     GtkBox* container;
-} WBObject;
-
-// This static variable is shared between all instances of this module
-static int instance_count = 0;
+} Instance;
 
 typedef struct {
     uint64_t id;
@@ -56,6 +53,8 @@ WorkspaceOutputs workspace_outputs;
 int64_t current_focused_workspace = -1;
 int64_t current_focused_window = -1;
 
+int instance_count = 0;
+
 #ifdef LOG_INFO
 #define log_info(...) fprintf(stderr, __VA_ARGS__)
 #else
@@ -75,14 +74,14 @@ int compare_window(const void* l, const void* r) {
 int connect_to_niri() {
     const char* socket_path = getenv("NIRI_SOCKET");
     if (!socket_path) {
-        log_info("[Niri Workspace Windows] Niri not running");
+        log_info("[Niri Workspace Windows] Niri not running\n");
         return -1;
     }
 
     struct sockaddr_un addr;
     int socketfd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (socketfd == -1) {
-        log_info("[Niri Workspace Windows] Failed to create socket");
+        log_info("[Niri Workspace Windows] Failed to create socket\n");
         return -1;
     }
 
@@ -92,7 +91,7 @@ int connect_to_niri() {
 
     if (connect(socketfd, (struct sockaddr*)&addr, sizeof(addr)) == -1) {
         close(socketfd);
-        log_info("[Niri Workspace Windows] Failed to connect socket");
+        log_info("[Niri Workspace Windows] Failed to connect socket\n");
         return -1;
     }
 
@@ -106,7 +105,7 @@ int parse_ipc(
     void (*queue_update)(wbcffi_module*)) {
     cJSON* root = cJSON_ParseWithLength(r, len);
     if (!cJSON_IsObject(root) || cJSON_GetArraySize(root) == 0) {
-        log_info("[Niri Workspace Windows] Empty response?");
+        log_info("[Niri Workspace Windows] Empty response?\n");
         cJSON_Delete(root);
         return 0;
     }
@@ -119,7 +118,7 @@ int parse_ipc(
         log_info("[Niri Workspace Windows] WorkspaceChanged\n");
         ev = ev->child;
         if (!cJSON_IsArray(ev)) {
-            log_info("[Niri Workspace Windows] Workspaces not array?");
+            log_info("[Niri Workspace Windows] Workspaces not array?\n");
             cJSON_Delete(root);
             mtx_unlock(&data_lock);
             return 0;
@@ -396,6 +395,7 @@ void* wbcffi_init(
     const wbcffi_init_info* init_info,
     const wbcffi_config_entry* config_entries,
     size_t config_entries_len) {
+    instance_count += 1;
     for (size_t i = 0; i < config_entries_len; i++) {
         const char* key = config_entries[i].key;
         const char* value = config_entries[i].value;
@@ -404,23 +404,25 @@ void* wbcffi_init(
             errno = 0;
             gint icon_size = strtol(value, &endptr, 10);
             if (errno || *endptr != '\n') {
-                fputs(
-                    "[Niri Workspace Windows] \"icon_size\" must be a number\n",
-                    stderr);
+                log_info(
+                    "[Niri Workspace Windows] \"icon_size\" must be a "
+                    "number\n");
                 return NULL;
             }
             ICON_SIZE = icon_size;
         }
     }
 
-    WBObject* inst = malloc(sizeof(WBObject));
+    Instance* inst = malloc(sizeof(Instance));
     inst->waybar_module = init_info->obj;
 
-    int socketfd = connect_to_niri();
-    if (socketfd == -1) {
-        return NULL;
+    if (instance_count == 1) {
+        int socketfd = connect_to_niri();
+        if (socketfd == -1) {
+            return NULL;
+        }
+        spawn_ipc(socketfd, inst->waybar_module, init_info->queue_update);
     }
-    spawn_ipc(socketfd, init_info->obj, init_info->queue_update);
 
     GtkContainer* root = init_info->get_root_widget(init_info->obj);
 
@@ -431,9 +433,8 @@ void* wbcffi_init(
     return inst;
 }
 
-void wbcffi_deinit(void* instance) {
-    // TBH I don't care the memory created in this process
-    free(instance);
+void wbcffi_deinit(void* inst) {
+    free(inst);
 }
 
 GArray* get_search_prefixes() {
@@ -491,7 +492,7 @@ end_of_desktop_file_seaching:;
     return GTK_WIDGET(btn);
 }
 
-char* get_current_output(WBObject* instance) {
+char* get_current_output(Instance* instance) {
     GdkWindow* gdk_win = gtk_widget_get_window(GTK_WIDGET(instance->container));
     if (!gdk_win) {
         return NULL;
@@ -529,7 +530,7 @@ void wbcffi_update(void* inst) {
     if (current_focused_workspace == -1) {
         return;
     }
-    WBObject* instance = inst;
+    Instance* instance = inst;
 
     char* current_output = get_current_output(instance);
 
