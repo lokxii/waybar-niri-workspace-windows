@@ -1,3 +1,5 @@
+#include <assert.h>
+#include <stdint.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <threads.h>
@@ -21,6 +23,9 @@ gint ICON_SIZE = 14;
 typedef struct {
     wbcffi_module* waybar_module;
     GtkBox* container;
+    mtx_t local_lock;
+    int quit;
+    thrd_t* thread;
 } Instance;
 
 typedef struct {
@@ -47,7 +52,9 @@ typedef struct {
     size_t len;
 } WorkspaceOutputs;
 
-mtx_t data_lock;
+mtx_t global_lock;
+cnd_t global_update_cond;
+int64_t stepping_counter = 0;
 Windows* windows;
 WorkspaceOutputs workspace_outputs;
 int64_t current_focused_workspace = -1;
@@ -109,7 +116,7 @@ int parse_ipc(
         cJSON_Delete(root);
         return 0;
     }
-    mtx_lock(&data_lock);
+    mtx_lock(&global_lock);
     cJSON* ev = root->child;
 
     int has_event = 0;
@@ -120,7 +127,7 @@ int parse_ipc(
         if (!cJSON_IsArray(ev)) {
             log_info("[Niri Workspace Windows] Workspaces not array?\n");
             cJSON_Delete(root);
-            mtx_unlock(&data_lock);
+            mtx_unlock(&global_lock);
             return 0;
         }
 
@@ -258,7 +265,7 @@ int parse_ipc(
             cJSON_GetObjectItemCaseSensitive(ev, "app_id")->valuestring;
         if (!app_id) {
             cJSON_Delete(root);
-            mtx_unlock(&data_lock);
+            mtx_unlock(&global_lock);
             return 0;
         }
         app_id = strdup(app_id);
@@ -266,7 +273,7 @@ int parse_ipc(
             cJSON_GetObjectItemCaseSensitive(ev, "title")->valuestring;
         if (!title) {
             cJSON_Delete(root);
-            mtx_unlock(&data_lock);
+            mtx_unlock(&global_lock);
             return 0;
         }
         title = strdup(title);
@@ -320,20 +327,21 @@ int parse_ipc(
     }
 
     cJSON_Delete(root);
-    mtx_unlock(&data_lock);
+    mtx_unlock(&global_lock);
     return has_event;
 }
 
 struct ipc_arg {
     int socketfd;
-    wbcffi_module* m;
+    Instance* inst;
     void (*queue_update)(wbcffi_module*);
 };
 
 int ipc(void* arg) {
     struct ipc_arg* ipc_arg = arg;
     int socketfd = ipc_arg->socketfd;
-    wbcffi_module* m = ipc_arg->m;
+    Instance* inst = ipc_arg->inst;
+    wbcffi_module* m = inst->waybar_module;
     void (*queue_update)(wbcffi_module*) = ipc_arg->queue_update;
 
     GInputStream* unix_istream = g_unix_input_stream_new(socketfd, TRUE);
@@ -367,28 +375,79 @@ int ipc(void* arg) {
     while ((r = g_data_input_stream_read_line(istream, &len, NULL, &e))) {
         if (parse_ipc(r, len, m, queue_update)) {
             queue_update(m);
+            stepping_counter += 1;
+            cnd_broadcast(&global_update_cond);
         }
         g_free(r);
+
+        mtx_lock(&inst->local_lock);
+        if (inst->quit) {
+            mtx_unlock(&inst->local_lock);
+            return 0;
+        }
+        mtx_unlock(&inst->local_lock);
     }
 
     free(ipc_arg);
     return 0;
 }
 
-void spawn_ipc(
+thrd_t* spawn_main_instance_thread(
     int socketfd,
-    wbcffi_module* m,
+    Instance* inst,
     void (*queue_update)(wbcffi_module*)) {
-    mtx_init(&data_lock, mtx_plain);
-    thrd_t thread;
+    mtx_init(&global_lock, mtx_plain);
+    thrd_t* thread = malloc(sizeof(*thread));
     struct ipc_arg* ipc_arg = malloc(sizeof(*ipc_arg));
     *ipc_arg = (struct ipc_arg){
         .socketfd = socketfd,
-        .m = m,
+        .inst = inst,
         .queue_update = queue_update,
     };
-    thrd_create(&thread, ipc, ipc_arg);
-    thrd_detach(thread);
+    thrd_create(thread, ipc, ipc_arg);
+    // thrd_detach(thread);
+    return thread;
+}
+
+struct sub_instance_thread_arg {
+    Instance* inst;
+    void (*queue_update)(wbcffi_module*);
+};
+
+int sub_instance_thread(void* a) {
+    struct sub_instance_thread_arg* arg = a;
+    int64_t local_stepping_counter = -1;
+    while (1) {
+        mtx_lock(&arg->inst->local_lock);
+        if (arg->inst->quit) {
+            mtx_unlock(&arg->inst->local_lock);
+            return 0;
+        }
+        mtx_unlock(&arg->inst->local_lock);
+
+        mtx_lock(&global_lock);
+        while (stepping_counter == local_stepping_counter) {
+            cnd_wait(&global_update_cond, &global_lock);
+        }
+        arg->queue_update(arg->inst->waybar_module);
+        local_stepping_counter = stepping_counter;
+        mtx_unlock(&global_lock);
+    }
+    return 0;
+}
+
+thrd_t* spawn_sub_instance_thread(
+    Instance* inst,
+    void (*queue_update)(wbcffi_module*)) {
+    thrd_t* thread = malloc(sizeof(*thread));
+    struct sub_instance_thread_arg* arg = malloc(sizeof(*arg));
+    *arg = (struct sub_instance_thread_arg){
+        .inst = inst,
+        .queue_update = queue_update,
+    };
+    thrd_create(thread, sub_instance_thread, arg);
+    // thrd_detach(thread);
+    return thread;
 }
 
 void* wbcffi_init(
@@ -416,12 +475,20 @@ void* wbcffi_init(
     Instance* inst = malloc(sizeof(Instance));
     inst->waybar_module = init_info->obj;
 
+    log_info("Instance count %d", instance_count);
+    mtx_init(&inst->local_lock, mtx_plain);
+    inst->quit = 0;
+
     if (instance_count == 1) {
         int socketfd = connect_to_niri();
         if (socketfd == -1) {
             return NULL;
         }
-        spawn_ipc(socketfd, inst->waybar_module, init_info->queue_update);
+        inst->thread =
+            spawn_main_instance_thread(socketfd, inst, init_info->queue_update);
+        cnd_init(&global_update_cond);
+    } else {
+        inst->thread = spawn_sub_instance_thread(inst, init_info->queue_update);
     }
 
     GtkContainer* root = init_info->get_root_widget(init_info->obj);
@@ -433,7 +500,20 @@ void* wbcffi_init(
     return inst;
 }
 
-void wbcffi_deinit(void* inst) {
+void wbcffi_deinit(void* i) {
+    Instance* inst = i;
+
+    mtx_lock(&inst->local_lock);
+    inst->quit = 1;
+    mtx_unlock(&inst->local_lock);
+
+    mtx_lock(&global_lock);
+    cnd_broadcast(&global_update_cond);
+    stepping_counter += 1;
+    mtx_unlock(&global_lock);
+
+    thrd_join(*inst->thread, NULL);
+    free(inst->thread);
     free(inst);
 }
 
