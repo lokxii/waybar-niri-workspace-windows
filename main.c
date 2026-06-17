@@ -515,6 +515,8 @@ void wbcffi_deinit(void* i) {
     thrd_join(*inst->thread, NULL);
     free(inst->thread);
     free(inst);
+
+    instance_count -= 1;
 }
 
 GArray* get_search_prefixes() {
