@@ -59,6 +59,8 @@ Windows* windows;
 WorkspaceOutputs workspace_outputs;
 int64_t current_focused_workspace = -1;
 int64_t current_focused_window = -1;
+thrd_t* ipc_thread = NULL;
+int ipc_kill = 0;
 
 int instance_count = 0;
 
@@ -116,7 +118,6 @@ int parse_ipc(
         cJSON_Delete(root);
         return 0;
     }
-    mtx_lock(&global_lock);
     cJSON* ev = root->child;
 
     int has_event = 0;
@@ -127,7 +128,6 @@ int parse_ipc(
         if (!cJSON_IsArray(ev)) {
             log_info("[Niri Workspace Windows] Workspaces not array?\n");
             cJSON_Delete(root);
-            mtx_unlock(&global_lock);
             return 0;
         }
 
@@ -265,7 +265,6 @@ int parse_ipc(
             cJSON_GetObjectItemCaseSensitive(ev, "app_id")->valuestring;
         if (!app_id) {
             cJSON_Delete(root);
-            mtx_unlock(&global_lock);
             return 0;
         }
         app_id = strdup(app_id);
@@ -273,7 +272,6 @@ int parse_ipc(
             cJSON_GetObjectItemCaseSensitive(ev, "title")->valuestring;
         if (!title) {
             cJSON_Delete(root);
-            mtx_unlock(&global_lock);
             return 0;
         }
         title = strdup(title);
@@ -327,21 +325,19 @@ int parse_ipc(
     }
 
     cJSON_Delete(root);
-    mtx_unlock(&global_lock);
     return has_event;
 }
 
 struct ipc_arg {
     int socketfd;
-    Instance* inst;
+    wbcffi_module* waybar_module;
     void (*queue_update)(wbcffi_module*);
 };
 
 int ipc(void* arg) {
     struct ipc_arg* ipc_arg = arg;
     int socketfd = ipc_arg->socketfd;
-    Instance* inst = ipc_arg->inst;
-    wbcffi_module* m = inst->waybar_module;
+    wbcffi_module* m = ipc_arg->waybar_module;
     void (*queue_update)(wbcffi_module*) = ipc_arg->queue_update;
 
     GInputStream* unix_istream = g_unix_input_stream_new(socketfd, TRUE);
@@ -373,19 +369,18 @@ int ipc(void* arg) {
 
     windows = Windows_init();
     while ((r = g_data_input_stream_read_line(istream, &len, NULL, &e))) {
+        mtx_lock(&global_lock);
         if (parse_ipc(r, len, m, queue_update)) {
             queue_update(m);
             stepping_counter += 1;
             cnd_broadcast(&global_update_cond);
         }
-        g_free(r);
-
-        mtx_lock(&inst->local_lock);
-        if (inst->quit) {
-            mtx_unlock(&inst->local_lock);
+        if (ipc_kill) {
+            g_free(r);
             return 0;
         }
-        mtx_unlock(&inst->local_lock);
+        mtx_unlock(&global_lock);
+        g_free(r);
     }
 
     free(ipc_arg);
@@ -394,18 +389,17 @@ int ipc(void* arg) {
 
 thrd_t* spawn_main_instance_thread(
     int socketfd,
-    Instance* inst,
+    wbcffi_module* m,
     void (*queue_update)(wbcffi_module*)) {
     mtx_init(&global_lock, mtx_plain);
     thrd_t* thread = malloc(sizeof(*thread));
     struct ipc_arg* ipc_arg = malloc(sizeof(*ipc_arg));
     *ipc_arg = (struct ipc_arg){
         .socketfd = socketfd,
-        .inst = inst,
+        .waybar_module = m,
         .queue_update = queue_update,
     };
     thrd_create(thread, ipc, ipc_arg);
-    // thrd_detach(thread);
     return thread;
 }
 
@@ -446,7 +440,6 @@ thrd_t* spawn_sub_instance_thread(
         .queue_update = queue_update,
     };
     thrd_create(thread, sub_instance_thread, arg);
-    // thrd_detach(thread);
     return thread;
 }
 
@@ -479,17 +472,17 @@ void* wbcffi_init(
     mtx_init(&inst->local_lock, mtx_plain);
     inst->quit = 0;
 
-    if (instance_count == 1) {
+    if (ipc_thread == NULL) {
         int socketfd = connect_to_niri();
         if (socketfd == -1) {
             return NULL;
         }
-        inst->thread =
-            spawn_main_instance_thread(socketfd, inst, init_info->queue_update);
+
+        ipc_thread = spawn_main_instance_thread(
+            socketfd, inst->waybar_module, init_info->queue_update);
         cnd_init(&global_update_cond);
-    } else {
-        inst->thread = spawn_sub_instance_thread(inst, init_info->queue_update);
     }
+    inst->thread = spawn_sub_instance_thread(inst, init_info->queue_update);
 
     GtkContainer* root = init_info->get_root_widget(init_info->obj);
 
@@ -498,6 +491,37 @@ void* wbcffi_init(
     gtk_container_add(GTK_CONTAINER(root), GTK_WIDGET(inst->container));
 
     return inst;
+}
+
+void clean_global_resource() {
+    mtx_lock(&global_lock);
+    ipc_kill = 1;
+    mtx_unlock(&global_lock);
+
+    thrd_join(*ipc_thread, NULL);
+    free(ipc_thread);
+    ipc_thread = NULL;
+    cnd_destroy(&global_update_cond);
+    mtx_destroy(&global_lock);
+    ipc_kill = 0;
+
+    khint_t k;
+    kh_foreach(windows, k) {
+        free(kh_val(windows, k).app_id);
+        free(kh_val(windows, k).title);
+    }
+    Windows_destroy(windows);
+
+    for (size_t i = 0; i < workspace_outputs.len; i++) {
+        free(workspace_outputs.outputs[i]);
+    }
+    free(workspace_outputs.ids);
+    free(workspace_outputs.outputs);
+    workspace_outputs.ids = NULL;
+    workspace_outputs.outputs = NULL;
+    workspace_outputs.len = 0;
+    current_focused_workspace = -1;
+    current_focused_window = -1;
 }
 
 void wbcffi_deinit(void* i) {
@@ -514,9 +538,14 @@ void wbcffi_deinit(void* i) {
 
     thrd_join(*inst->thread, NULL);
     free(inst->thread);
+    mtx_destroy(&inst->local_lock);
     free(inst);
 
     instance_count -= 1;
+
+    if (instance_count == 0) {
+        clean_global_resource();
+    }
 }
 
 GArray* get_search_prefixes() {
@@ -609,7 +638,9 @@ int should_display_window_icon(
 
 // Just remove all elements and repopulate container contents
 void wbcffi_update(void* inst) {
+    mtx_lock(&global_lock);
     if (current_focused_workspace == -1) {
+        mtx_unlock(&global_lock);
         return;
     }
     Instance* instance = inst;
@@ -662,6 +693,7 @@ void wbcffi_update(void* inst) {
         gtk_box_reorder_child(instance->container, widget, i);
         gtk_widget_show_all(GTK_WIDGET(instance->container));
     }
+    mtx_unlock(&global_lock);
 }
 
 void wbcffi_refresh(void* instance, int signal) {
