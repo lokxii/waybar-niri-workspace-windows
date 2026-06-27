@@ -107,11 +107,7 @@ int connect_to_niri() {
     return socketfd;
 }
 
-int parse_ipc(
-    const char* r,
-    gsize len,
-    wbcffi_module* m,
-    void (*queue_update)(wbcffi_module*)) {
+int parse_ipc(const char* r, gsize len) {
     cJSON* root = cJSON_ParseWithLength(r, len);
     if (!cJSON_IsObject(root) || cJSON_GetArraySize(root) == 0) {
         log_info("[Niri Workspace Windows] Empty response?\n");
@@ -370,15 +366,14 @@ int ipc(void* arg) {
     windows = Windows_init();
     while ((r = g_data_input_stream_read_line(istream, &len, NULL, &e))) {
         mtx_lock(&global_lock);
-        if (parse_ipc(r, len, m, queue_update)) {
-            queue_update(m);
+        if (parse_ipc(r, len)) {
             stepping_counter += 1;
             cnd_broadcast(&global_update_cond);
         }
-        if (ipc_kill) {
-            g_free(r);
-            return 0;
-        }
+        // if (ipc_kill) {
+        //     g_free(r);
+        //     return 0;
+        // }
         mtx_unlock(&global_lock);
         g_free(r);
     }
@@ -562,10 +557,10 @@ GArray* get_search_prefixes() {
 }
 
 GtkWidget* widget_from_app_id(const char* app_id) {
-    // TODO: Add cache?
     GArray* search_prefixes = get_search_prefixes();
     char* app_folders[] = {"", "applications/"};
     char* suffixes[] = {"", ".desktop"};
+    const char* app_icon = NULL;
     for (int i = 0; i < search_prefixes->len; i++) {
         for (int j = 0; j < sizeof(app_folders) / sizeof(*app_folders); j++) {
             for (int k = 0; k < sizeof(suffixes) / sizeof(*suffixes); k++) {
@@ -582,7 +577,7 @@ GtkWidget* widget_from_app_id(const char* app_id) {
                     const char* s =
                         g_desktop_app_info_get_string(app_info, "Icon");
                     if (s) {
-                        app_id = s;
+                        app_icon = s;
                         goto end_of_desktop_file_seaching;
                     }
                 }
@@ -594,9 +589,30 @@ end_of_desktop_file_seaching:;
         g_string_free(g_array_index(search_prefixes, GString*, i), TRUE);
     }
     g_array_free(search_prefixes, FALSE);
-    GtkImage* img =
-        GTK_IMAGE(gtk_image_new_from_icon_name(app_id, GTK_ICON_SIZE_INVALID));
+
+    GtkImage* img = GTK_IMAGE(gtk_image_new());
+    if (!app_icon) {
+        gtk_image_set_from_icon_name(
+            img, "image-missing", GTK_ICON_SIZE_INVALID);
+    } else if (app_icon[0] == '/') {
+        GError* e;
+        GdkPixbuf* pixbuf = gdk_pixbuf_new_from_file(app_icon, &e);
+        if (!pixbuf) {
+            log_info("%s", e->message);
+            gtk_widget_set_visible(GTK_WIDGET(img), FALSE);
+            goto set_button_image;
+        }
+        cairo_surface_t* surface = gdk_cairo_surface_create_from_pixbuf(
+            pixbuf,
+            gtk_widget_get_scale_factor(GTK_WIDGET(img)),
+            gtk_widget_get_window(GTK_WIDGET(img)));
+        gtk_image_set_from_surface(img, surface);
+    } else {
+        gtk_image_set_from_icon_name(img, app_icon, GTK_ICON_SIZE_INVALID);
+    }
+
     gtk_image_set_pixel_size(img, ICON_SIZE);
+set_button_image:;
     GtkButton* btn = GTK_BUTTON(gtk_button_new());
     gtk_button_set_image(btn, GTK_WIDGET(img));
 
@@ -648,14 +664,14 @@ void wbcffi_update(void* inst) {
     char* current_output = get_current_output(instance);
 
     khint_t k;
-    size_t ws_n = 0;
+    size_t dw_n = 0;
     if (current_focused_window >= 0) {
         kh_foreach(windows, k) {
-            ws_n += should_display_window_icon(
+            dw_n += should_display_window_icon(
                 kh_val(windows, k), current_focused_workspace, current_output);
         }
     }
-    Window ws[ws_n];
+    Window displaying_windows[dw_n];
     if (current_focused_window >= 0) {
         size_t i = 0;
         kh_foreach(windows, k) {
@@ -663,11 +679,15 @@ void wbcffi_update(void* inst) {
                     kh_val(windows, k),
                     current_focused_workspace,
                     current_output)) {
-                ws[i] = kh_val(windows, k);
+                displaying_windows[i] = kh_val(windows, k);
                 i += 1;
             }
         }
-        qsort(ws, ws_n, sizeof(*ws), compare_window);
+        qsort(
+            displaying_windows,
+            dw_n,
+            sizeof(*displaying_windows),
+            compare_window);
     }
 
     g_free(current_output);
@@ -680,11 +700,11 @@ void wbcffi_update(void* inst) {
         children = children->next;
     }
 
-    for (size_t i = 0; i < ws_n; i++) {
-        GtkWidget* widget = widget_from_app_id(ws[i].app_id);
-        gtk_widget_set_tooltip_text(widget, ws[i].title);
+    for (size_t i = 0; i < dw_n; i++) {
+        GtkWidget* widget = widget_from_app_id(displaying_windows[i].app_id);
+        gtk_widget_set_tooltip_text(widget, displaying_windows[i].title);
         GtkStyleContext* context = gtk_widget_get_style_context(widget);
-        if (ws[i].id == current_focused_window) {
+        if (displaying_windows[i].id == current_focused_window) {
             gtk_style_context_add_class(context, "focused");
         } else {
             gtk_style_context_remove_class(context, "focused");
